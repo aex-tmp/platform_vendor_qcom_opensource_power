@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -48,8 +48,6 @@
 #include "power-common.h"
 #include "utils.h"
 
-static int first_display_off_hint;
-
 static int process_video_encode_hint(void* metadata) {
     char governor[80];
     struct video_encode_metadata_t video_encode_metadata;
@@ -73,8 +71,13 @@ static int process_video_encode_hint(void* metadata) {
 
     if (video_encode_metadata.state == 1) {
         if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_30, HISPEED_LOAD_90, HS_FREQ_1026,
-                                     THREAD_MIGRATION_SYNC_OFF, INTERACTIVE_IO_BUSY_OFF};
+            /* sched and cpufreq params
+             * hispeed freq - 768 MHz
+             * target load - 90
+             * above_hispeed_delay - 40ms
+             * sched_small_tsk - 50
+             */
+            int resource_values[] = {0x2C07, 0x2F5A, 0x2704, 0x4032};
             perform_hint_action(video_encode_metadata.hint_id, resource_values,
                                 ARRAY_SIZE(resource_values));
             return HINT_HANDLED;
@@ -127,35 +130,24 @@ static int process_video_decode_hint(void* metadata) {
 }
 
 // clang-format off
-/* fling boost: min 3 CPUs, min 1.1 GHz */
 static int resources_interaction_fling_boost[] = {
-    CPUS_ONLINE_MIN_3,
-    CPU0_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU1_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 1
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_BOOST_ON,
+    SCHED_PREFER_IDLE_DIS
 };
 
-/* interactive boost: min 2 CPUs, min 1.1 GHz */
 static int resources_interaction_boost[] = {
-    CPUS_ONLINE_MIN_2,
-    CPU0_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU1_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 1
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_PREFER_IDLE_DIS
 };
 
-/* lauch boost: min 2 CPUs, full power for 2 CPUs, min 1.5 GHz for the others */
 static int resources_launch[] = {
-    CPUS_ONLINE_MIN_2,
-    CPU0_MIN_FREQ_TURBO_MAX,
-    CPU1_MIN_FREQ_TURBO_MAX,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 5,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 5
+    SCHED_BOOST_ON,
+    0x20C
 };
 // clang-format on
 
-const int kDefaultInteractiveDuration = 200; /* ms */
+const int kDefaultInteractiveDuration = 500; /* ms */
 const int kMinFlingDuration = 1500;          /* ms */
 const int kMaxInteractiveDuration = 5000;    /* ms */
 const int kMaxLaunchDuration = 5000;         /* ms */
@@ -254,26 +246,13 @@ int set_interactive_override(int on) {
 
     if (!on) {
         /* Display off */
-        /*
-         * We need to be able to identify the first display off hint
-         * and release the current lock holder
-         */
-        if (!first_display_off_hint) {
-            undo_initial_hint_action();
-            first_display_off_hint = 1;
-        }
-        /* Used for all subsequent toggles to the display */
-        undo_hint_action(DISPLAY_STATE_HINT_ID_2);
         if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_50, THREAD_MIGRATION_SYNC_OFF};
+            int resource_values[] = {CPUS_ONLINE_MPD_OVERRIDE}; /* 4+0 core config in display off */
             perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
                                 ARRAY_SIZE(resource_values));
         }
     } else {
         /* Display on */
-        int resource_values2[] = {CPUS_ONLINE_MIN_2};
-        perform_hint_action(DISPLAY_STATE_HINT_ID_2, resource_values2,
-                            ARRAY_SIZE(resource_values2));
         if (is_interactive_governor(governor)) {
             undo_hint_action(DISPLAY_STATE_HINT_ID);
         }

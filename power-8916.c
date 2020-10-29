@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -26,6 +26,7 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 #define LOG_NIDEBUG 0
 
 #include <dlfcn.h>
@@ -48,114 +49,48 @@
 #include "power-common.h"
 #include "utils.h"
 
-static int first_display_off_hint;
+/**
+ * Returns true if the target is MSM8916.
+ */
+static bool is_target_8916(void) {
+    static int is_8916 = -1;
+    int soc_id;
 
-static int process_video_encode_hint(void* metadata) {
-    char governor[80];
-    struct video_encode_metadata_t video_encode_metadata;
+    if (is_8916 >= 0) return is_8916;
 
-    if (!metadata) return HINT_NONE;
+    soc_id = get_soc_id();
+    is_8916 = soc_id == 206 || (soc_id >= 247 && soc_id <= 250);
 
-    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
-        ALOGE("Can't obtain scaling governor.");
-        return HINT_NONE;
-    }
-
-    /* Initialize encode metadata struct fields */
-    memset(&video_encode_metadata, 0, sizeof(struct video_encode_metadata_t));
-    video_encode_metadata.state = -1;
-    video_encode_metadata.hint_id = DEFAULT_VIDEO_ENCODE_HINT_ID;
-
-    if (parse_video_encode_metadata((char*)metadata, &video_encode_metadata) == -1) {
-        ALOGE("Error occurred while parsing metadata.");
-        return HINT_NONE;
-    }
-
-    if (video_encode_metadata.state == 1) {
-        if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_30, HISPEED_LOAD_90, HS_FREQ_1026,
-                                     THREAD_MIGRATION_SYNC_OFF, INTERACTIVE_IO_BUSY_OFF};
-            perform_hint_action(video_encode_metadata.hint_id, resource_values,
-                                ARRAY_SIZE(resource_values));
-            return HINT_HANDLED;
-        }
-    } else if (video_encode_metadata.state == 0) {
-        if (is_interactive_governor(governor)) {
-            undo_hint_action(video_encode_metadata.hint_id);
-            return HINT_HANDLED;
-        }
-    }
-    return HINT_NONE;
-}
-
-static int process_video_decode_hint(void* metadata) {
-    char governor[80];
-    struct video_decode_metadata_t video_decode_metadata;
-
-    if (!metadata) return HINT_NONE;
-
-    if (get_scaling_governor(governor, sizeof(governor)) == -1) {
-        ALOGE("Can't obtain scaling governor.");
-        return HINT_NONE;
-    }
-
-    /* Initialize decode metadata struct fields */
-    memset(&video_decode_metadata, 0, sizeof(struct video_decode_metadata_t));
-    video_decode_metadata.state = -1;
-    video_decode_metadata.hint_id = DEFAULT_VIDEO_DECODE_HINT_ID;
-
-    if (parse_video_decode_metadata((char*)metadata, &video_decode_metadata) == -1) {
-        ALOGE("Error occurred while parsing metadata.");
-        return HINT_NONE;
-    }
-
-    if (video_decode_metadata.state == 1) {
-        if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_30, HISPEED_LOAD_90, HS_FREQ_1026,
-                                     THREAD_MIGRATION_SYNC_OFF};
-            perform_hint_action(video_decode_metadata.hint_id, resource_values,
-                                ARRAY_SIZE(resource_values));
-            return HINT_HANDLED;
-        }
-    } else if (video_decode_metadata.state == 0) {
-        if (is_interactive_governor(governor)) {
-            undo_hint_action(video_decode_metadata.hint_id);
-            return HINT_HANDLED;
-        }
-    }
-    return HINT_NONE;
+    return is_8916;
 }
 
 // clang-format off
-/* fling boost: min 3 CPUs, min 1.1 GHz */
 static int resources_interaction_fling_boost[] = {
-    CPUS_ONLINE_MIN_3,
-    CPU0_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU1_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 1
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_BOOST_ON,
+    SCHED_PREFER_IDLE_DIS,
+    0x20D
 };
 
-/* interactive boost: min 2 CPUs, min 1.1 GHz */
 static int resources_interaction_boost[] = {
-    CPUS_ONLINE_MIN_2,
-    CPU0_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU1_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 1,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 1
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_PREFER_IDLE_DIS,
+    0x20D
 };
 
-/* lauch boost: min 2 CPUs, full power for 2 CPUs, min 1.5 GHz for the others */
 static int resources_launch[] = {
-    CPUS_ONLINE_MIN_2,
-    CPU0_MIN_FREQ_TURBO_MAX,
-    CPU1_MIN_FREQ_TURBO_MAX,
-    CPU2_MIN_FREQ_NONTURBO_MAX + 5,
-    CPU3_MIN_FREQ_NONTURBO_MAX + 5
+    ALL_CPUS_PWR_CLPS_DIS,
+    SCHED_BOOST_ON,
+    SCHED_PREFER_IDLE_DIS,
+    0x20F,
+    0x1C00,
+    0x4001,
+    0x4101,
+    0x4201
 };
 // clang-format on
 
-const int kDefaultInteractiveDuration = 200; /* ms */
+const int kDefaultInteractiveDuration = 500; /* ms */
 const int kMinFlingDuration = 1500;          /* ms */
 const int kMaxInteractiveDuration = 5000;    /* ms */
 const int kMaxLaunchDuration = 5000;         /* ms */
@@ -225,11 +160,8 @@ static int process_activity_launch_hint(void* data) {
 int power_hint_override(power_hint_t hint, void* data) {
     int ret_val = HINT_NONE;
     switch (hint) {
-        case POWER_HINT_VIDEO_ENCODE:
-            ret_val = process_video_encode_hint(data);
-            break;
-        case POWER_HINT_VIDEO_DECODE:
-            ret_val = process_video_decode_hint(data);
+        case POWER_HINT_VIDEO_ENCODE: /* Do nothing for encode case */
+            ret_val = HINT_HANDLED;
             break;
         case POWER_HINT_INTERACTION:
             process_interaction_hint(data);
@@ -254,26 +186,21 @@ int set_interactive_override(int on) {
 
     if (!on) {
         /* Display off */
-        /*
-         * We need to be able to identify the first display off hint
-         * and release the current lock holder
-         */
-        if (!first_display_off_hint) {
-            undo_initial_hint_action();
-            first_display_off_hint = 1;
-        }
-        /* Used for all subsequent toggles to the display */
-        undo_hint_action(DISPLAY_STATE_HINT_ID_2);
-        if (is_interactive_governor(governor)) {
-            int resource_values[] = {TR_MS_50, THREAD_MIGRATION_SYNC_OFF};
-            perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
-                                ARRAY_SIZE(resource_values));
+        if (is_target_8916()) {
+            if (is_interactive_governor(governor)) {
+                int resource_values[] = {TR_MS_50, THREAD_MIGRATION_SYNC_OFF};
+                perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
+                                    ARRAY_SIZE(resource_values));
+            }
+        } else {
+            if (is_interactive_governor(governor)) {
+                int resource_values[] = {TR_MS_CPU0_50, TR_MS_CPU4_50, THREAD_MIGRATION_SYNC_OFF};
+                perform_hint_action(DISPLAY_STATE_HINT_ID, resource_values,
+                                    ARRAY_SIZE(resource_values));
+            }
         }
     } else {
         /* Display on */
-        int resource_values2[] = {CPUS_ONLINE_MIN_2};
-        perform_hint_action(DISPLAY_STATE_HINT_ID_2, resource_values2,
-                            ARRAY_SIZE(resource_values2));
         if (is_interactive_governor(governor)) {
             undo_hint_action(DISPLAY_STATE_HINT_ID);
         }
